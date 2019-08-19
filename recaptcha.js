@@ -1,109 +1,86 @@
 const axios = require('axios')
-const https = require('https')
+const puppeteer = require("puppeteer-extra")
+const pluginStealth = require("puppeteer-extra-plugin-stealth")
+puppeteer.use(pluginStealth())
 
-function rdn(min, max) {
-    min = Math.ceil(min)
-    max = Math.floor(max)
-    return Math.floor(Math.random() * (max - min)) + min
+let browser = null;
+
+async function solve() {
+    browser = await puppeteer.launch({
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+        ]
+    });
+
+    /* GOTO */
+
+    let frames = await page.frames();
+
+    const recaptchaFrame = frames.find(frame => frame.url().includes('api2/anchor'));
+    const checkbox = await recaptchaFrame.$('#recaptcha-anchor');
+
+    const value = await recaptchaFrame.evaluate((obj) => {
+        return obj.getAttribute('aria-checked');
+    }, checkbox);
+    await checkbox.click();
+
+    await this.sleep(2000);
+
+    const challengeFrame = frames.find(frame => frame.url().includes('api2/bframe'));
+
+    const audioButton = await challengeFrame.waitForSelector('#recaptcha-audio-button', { visible: true, timeout: 0 }).then(() => {
+        return challengeFrame.$('#recaptcha-audio-button');
+    });
+    await audioButton.click();
+
+    await this.sleep(5000);
+
+    let audioCaptchaURL = await challengeFrame.evaluate(() => {
+        return document.querySelector('a').href;
+    });
+
+    await downloadMp3(audioCaptchaURL, 'audioCaptcha.mp3');
+    let answer = await recognizeSpeech('audioCaptcha.mp3')
+
+    await challengeFrame.type('#audio-response', answer);
+
+    await this.sleep(5000);
+    await challengeFrame.click('#recaptcha-verify-button');
+
+    await this.sleep(2500);
+    await page.click('button.js-signup-button');
 }
 
-async function solve(page) {
-    try {
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => false
-            })
-        })
-
-        await page.waitForFunction(() => {
-            const iframe = document.querySelector('iframe[src*="api2/anchor"]')
-            if (!iframe) return false
-
-            return !!iframe.contentWindow.document.querySelector('#recaptcha-anchor')
-        })
-
-        let frames = await page.frames()
-        const recaptchaFrame = frames.find(frame => frame.url().includes('api2/anchor'))
-
-        const checkbox = await recaptchaFrame.$('#recaptcha-anchor')
-        await checkbox.click({
-            delay: rdn(30, 150)
-        })
-
-        await page.waitForFunction(() => {
-            const iframe = document.querySelector('iframe[src*="api2/bframe"]')
-            if (!iframe) return false
-
-            const img = iframe.contentWindow.document.querySelector('.rc-image-tile-wrapper img')
-            return img && img.complete
-        })
-
-        frames = await page.frames()
-        const imageFrame = frames.find(frame => frame.url().includes('api2/bframe'))
-        const audioButton = await imageFrame.$('#recaptcha-audio-button')
-        await audioButton.click({
-            delay: rdn(30, 150)
-        })
-        await page.waitForFunction(() => {
-            const iframe = document.querySelector('iframe[src*="api2/bframe"]')
-            if (!iframe) return false
-
-            return !!iframe.contentWindow.document.querySelector('.rc-audiochallenge-tdownload-link')
-        })
-
-        const audioLink = await page.evaluate(() => {
-            const iframe = document.querySelector('iframe[src*="api2/bframe"]')
-            return iframe.contentWindow.document.querySelector('.rc-audiochallenge-tdownload-link').href
-        })
-
-        const audioBytes = await page.evaluate(audioLink => {
-            return (async () => {
-                const response = await window.fetch(audioLink)
-                const buffer = await response.arrayBuffer()
-                return Array.from(new Uint8Array(buffer))
-            })()
-        }, audioLink)
-
-        const httsAgent = new https.Agent({
-            rejectUnauthorized: false
-        })
-        const response = await axios({
-            httsAgent,
-            method: 'post',
-            url: 'https://api.wit.ai/speech?v=20170307',
-            data: new Uint8Array(audioBytes).buffer,
-            headers: {
-                'Authorization': 'Bearer JVHWCNWJLWLGN6MFALYLHAPKUFHMNTAC',
-                'Content-Type': 'audio/mpeg3'
-            }
-        })
-
-        const audioTranscript = response.data['_text'].trim()
-        const input = await imageFrame.$('#audio-response')
-        await input.click({
-            delay: rdn(30, 150)
-        })
-        await input.type(audioTranscript, {
-            delay: rdn(30, 75)
-        })
-
-        const verifyButton = await imageFrame.$('#recaptcha-verify-button')
-        await verifyButton.click({
-            delay: rdn(30, 150)
-        })
-
-        await page.waitForFunction(() => {
-            const iframe = document.querySelector('iframe[src*="api2/anchor"]')
-            if (!iframe) return false
-
-            return !!iframe.contentWindow.document.querySelector('#recaptcha-anchor[aria-checked="true"]')
-        })
-
-        return page.evaluate(() => document.getElementById('g-recaptcha-response').value)
-    } catch (e) {
-        console.log(e)
-        return ''
-    }
+async function downloadMp3(url, path) {
+    const res = await axios.request({
+        responseType: 'arraybuffer',
+        url: url,
+        method: 'get',
+        headers: {
+            'Content-Type': 'audio/mpeg',
+        },
+    }).then((result) => {
+        const outputFilename = path;
+        fs.writeFileSync(outputFilename, result.data);
+        return outputFilename;
+    });
+    return res;
 }
 
-module.exports = solve
+async function recognizeSpeech(path) {
+    let payload = new FormData();
+    payload.append('audio', fs.createReadStream(path));
+    let res = await axios.post('https://api.wit.ai/speech', payload, {
+        headers: {
+            'Authorization': 'Bearer <auth_token>',
+            'Content-Type': 'audio/mpeg3'
+        },
+    }).then(response => {
+        return response.data._text;
+    })
+    return res;
+}
+
+solve();
